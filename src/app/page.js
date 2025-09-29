@@ -21,7 +21,8 @@ export default function Page() {
   // Bird state (x, y, velocity)
   const [bird, setBird] = useState({
     x: 100,
-    y: typeof window !== "undefined" ? window.innerHeight / 2 : 300,
+    // stable fallback to avoid SSR/client mismatch; updated on mount
+    y: 300,
     velocity: 0,
   });
 
@@ -34,18 +35,17 @@ export default function Page() {
 
   // Score tracking
   const [score, setScore] = useState(0);
-  const [highScore, setHighScore] = useState(() =>
-    typeof window !== "undefined"
-      ? parseInt(localStorage.getItem("flappyHighScore") || "0")
-      : 0
-  );
+  // avoid reading localStorage during render to prevent hydration mismatch
+  const [highScore, setHighScore] = useState(0);
 
   // Game width & height (responsive)
   const [gameWidth, setGameWidth] = useState(
-    typeof window !== "undefined" ? window.innerWidth : 800
+    /* use a stable fallback so server and initial client render match */
+    800
   );
   const [gameHeight, setGameHeight] = useState(
-    typeof window !== "undefined" ? window.innerHeight : 600
+    /* use a stable fallback so server and initial client render match */
+    600
   );
 
   // -------------------------------
@@ -54,11 +54,13 @@ export default function Page() {
   const jump = useCallback(() => {
     if (!gameStarted) {
       setGameStarted(true);
+      // create first pipe with proper bottomHeight so collision math is correct
+      const topH = Math.random() * (gameHeight - PIPE_GAP - 100) + 50;
       setPipes([
         {
           x: gameWidth,
-          topHeight: Math.random() * (gameHeight - PIPE_GAP - 100) + 50,
-          bottomHeight: 0,
+          topHeight: topH,
+          bottomHeight: gameHeight - topH - PIPE_GAP,
           passed: false,
         },
       ]);
@@ -89,6 +91,21 @@ export default function Page() {
     };
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  // Run once on mount to set window-dependent state and read localStorage
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    // set up accurate sizes on client after hydration to avoid mismatch
+    setGameWidth(window.innerWidth);
+    setGameHeight(window.innerHeight);
+
+    // center bird vertically using the actual height
+    setBird((prev) => ({ ...prev, y: window.innerHeight / 2 }));
+
+    // read persisted high score on client only
+    const stored = parseInt(localStorage.getItem("flappyHighScore") || "0");
+    setHighScore(Number.isNaN(stored) ? 0 : stored);
   }, []);
 
   // -------------------------------
@@ -160,27 +177,46 @@ export default function Page() {
     if (!gameStarted || gameOver) return;
 
     const checkCollisions = () => {
-      pipes.forEach((pipe) => {
+      let collided = false;
+      // build a new pipes array so we don't mutate state directly
+      let newPipes = pipes.map((pipe) => ({ ...pipe }));
+      let newlyPassed = 0;
+
+      for (let i = 0; i < newPipes.length; i++) {
+        const pipe = newPipes[i];
+        // collision
         if (
           bird.x + BIRD_WIDTH > pipe.x &&
           bird.x < pipe.x + PIPE_WIDTH &&
-          (bird.y < pipe.topHeight ||
-            bird.y + BIRD_HEIGHT > gameHeight - pipe.bottomHeight)
+          (bird.y < pipe.topHeight || bird.y + BIRD_HEIGHT > gameHeight - pipe.bottomHeight)
         ) {
-          setGameOver(true);
+          collided = true;
+          break;
         }
+
+        // scoring: count pipes that the bird has just passed
         if (!pipe.passed && bird.x > pipe.x + PIPE_WIDTH) {
           pipe.passed = true;
-          setScore((prev) => {
-            const newScore = prev + 1;
-            if (newScore > highScore) {
-              setHighScore(newScore);
-              localStorage.setItem("flappyHighScore", newScore.toString());
-            }
-            return newScore;
-          });
+          newlyPassed += 1;
         }
-      });
+      }
+
+      if (collided) {
+        setGameOver(true);
+        return;
+      }
+
+      if (newlyPassed > 0) {
+        setPipes(newPipes);
+        setScore((prev) => {
+          const newScore = prev + newlyPassed;
+          if (newScore > highScore) {
+            setHighScore(newScore);
+            localStorage.setItem("flappyHighScore", newScore.toString());
+          }
+          return newScore;
+        });
+      }
     };
 
     checkCollisions();
